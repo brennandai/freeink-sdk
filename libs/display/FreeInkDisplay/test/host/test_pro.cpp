@@ -12,9 +12,14 @@
 #include "src/driver/Uc8179Driver.h"
 #include "src/driver/Uc8279X4Driver.h"
 #undef private
+#include "src/lut/Uc8279X4GcLuts.h"
 
 using namespace freeink;
 using Bytes = std::vector<uint8_t>;
+
+#ifndef EXPECTED_GC_WAVEFORM
+#error "run_pro.py passes EXPECTED_GC_WAVEFORM for the compiled FREEINK_UC8279X4_GC_WAVEFORM"
+#endif
 
 static uint8_t lastRegister(const EpdBus& bus, uint8_t command) {
   for (auto i = bus.writes.rbegin(); i != bus.writes.rend(); ++i)
@@ -517,6 +522,160 @@ static void testUc8279X4WaveformSelection() {
   free(driver._grayBase);
 }
 
+static const Uc8279X4GcLut* expectedGcBank() {
+  if (EXPECTED_GC_WAVEFORM == 1) return kUc8279X4GcControl;
+  if (EXPECTED_GC_WAVEFORM == 2) return kUc8279X4GcMerged;
+  return nullptr;
+}
+
+static Bytes commandsOf(const EpdBus& bus) {
+  Bytes commands;
+  for (const auto& w : bus.writes) commands.push_back(w.command);
+  return commands;
+}
+
+static Bytes gcCommands(bool powerOn, bool registerGc) {
+  Bytes expected = {0x13, 0x10, 0x50, 0xe0, 0xe5};
+  if (powerOn) expected.push_back(0x04);
+  expected.push_back(0x00);
+  if (registerGc)
+    for (uint8_t reg = 0x20; reg <= 0x24; ++reg) expected.push_back(reg);
+  expected.push_back(0x12);
+  expected.push_back(0x10);
+  return expected;
+}
+
+// Half seeds OLD with the complement of the visible rows and white padding.
+static void assertScrubSeed(const Bytes& old, const Bytes& page) {
+  assert(old.size() == 60000);
+  for (unsigned y = 0; y < 600; ++y)
+    for (unsigned x = 0; x < 100; ++x) {
+      assert(old[y * 100 + x] == (y >= 120 ? uint8_t(~page[(y - 120) * 100 + x]) : 0xff));
+    }
+}
+
+// The register GC seeds OLD with the target so only WW/KK rows run; the OTP GC
+// keeps the stock white seed (Full/promoted Fast) and complement scrub (Half).
+static void assertGcSeed(const EpdBus& bus, const Bytes& page, bool registerGc, RefreshMode mode) {
+  const Bytes& old = bus.writes[1].bytes;
+  if (registerGc) {
+    assert(old == bus.writes[0].bytes);
+  } else if (mode == RefreshMode::Half) {
+    assertScrubSeed(old, page);
+  } else {
+    assert(old == Bytes(60000, 0xff));
+  }
+}
+
+// Every value this GC path writes must be one the stock driver already sends.
+static void checkGcRegisters(const EpdBus& bus, bool registerGc) {
+  assert(lastRegister(bus, 0x50) == 0x97);
+  assert(lastRegister(bus, 0xe0) == 0x02);
+  assert(lastRegister(bus, 0xe5) == 0x1e);
+  const auto& psr = lastPlane(bus, 0x00);
+  assert(psr == Bytes({uint8_t(registerGc ? 0x37 : 0x17), 0x4d}));
+  const Uc8279X4GcLut* bank = registerGc ? expectedGcBank() : nullptr;
+  unsigned luts = 0;
+  for (const auto& w : bus.writes) {
+    if (w.command < 0x20 || w.command > 0x24) continue;
+    assert(bank != nullptr);
+    const auto& row = bank[w.command - 0x20];
+    assert(row.reg == w.command);
+    assert(w.bytes == Bytes(row.data, row.data + UC8279X4_GC_LUT_LEN));
+    ++luts;
+  }
+  assert(luts == (bank != nullptr ? UC8279X4_GC_LUT_COUNT : 0u));
+}
+
+static void testUc8279X4GcWaveform() {
+  const auto page = frame(51);
+  for (uint8_t variant : {0x02, 0x68}) {
+    BoardConfig::ACTIVE.displayControllerVariant = variant;
+    const bool registerGc = variant == 0x02 && expectedGcBank() != nullptr;
+    Uc8279X4Driver driver;
+    EpdBus bus;
+    driver.begin(bus);
+    bus.clear();
+    // The first paint after begin() is a promoted Fast; it must take the same GC.
+    driver.display(bus, page.data(), nullptr, RefreshMode::Fast, false);
+    assert(commandsOf(bus) == gcCommands(true, registerGc));
+    assert(lastPlane(bus, 0x13).size() == 60000);
+    assertGcSeed(bus, page, registerGc, RefreshMode::Fast);
+    checkGcRegisters(bus, registerGc);
+    for (auto mode : {RefreshMode::Full, RefreshMode::Half}) {
+      bus.clear();
+      driver.display(bus, page.data(), nullptr, mode, false);
+      assert(commandsOf(bus) == gcCommands(false, registerGc));
+      checkGcRegisters(bus, registerGc);
+      assertGcSeed(bus, page, registerGc, mode);
+    }
+    // The B/W DU stays on the OTP bank with its stock registers.
+    bus.clear();
+    driver.display(bus, page.data(), nullptr, RefreshMode::Fast, false);
+    assert(commandsOf(bus) == Bytes({0x13, 0x50, 0xe0, 0xe5, 0x03, 0xe1, 0x91, 0x90, 0x00, 0x12, 0x92, 0x10}));
+    assert(lastRegister(bus, 0x50) == 0xd7 && lastRegister(bus, 0xe5) == 0x5a);
+    assert(lastPlane(bus, 0x00) == Bytes({0x17, 0x4d}));
+    // Sleep paints power down after the GC completes, then the panel sleeps.
+    bus.clear();
+    driver.display(bus, page.data(), nullptr, RefreshMode::Half, true);
+    Bytes sleepPaint = gcCommands(false, registerGc);
+    sleepPaint.push_back(0x02);
+    assert(commandsOf(bus) == sleepPaint && !driver._isScreenOn);
+    driver.deepSleep(bus);
+    assert(bus.writes.back().command == 0x07 && bus.writes.back().bytes == Bytes({0xa5}));
+    // A wake GC powers the panel on before the PSR latch and the bank upload.
+    driver.begin(bus);
+    bus.clear();
+    driver.display(bus, page.data(), nullptr, RefreshMode::Full, false);
+    assert(commandsOf(bus) == gcCommands(true, registerGc));
+    checkGcRegisters(bus, registerGc);
+    free(driver._grayBase);
+  }
+  BoardConfig::ACTIVE.displayControllerVariant = 0x68;
+}
+
+// Grayscale bases and absolute/direct image passes still promote to a GC; that
+// GC must use the same bank, and no session may send an unlisted command.
+static void testUc8279X4GcSessionCommands() {
+  BoardConfig::ACTIVE.displayControllerVariant = 0x02;
+  const Bytes stockCommands = {0x00, 0x02, 0x03, 0x04, 0x07, 0x10, 0x12, 0x13, 0x20, 0x21, 0x22, 0x23,
+                               0x24, 0x30, 0x50, 0x61, 0x65, 0x90, 0x91, 0x92, 0xe0, 0xe1, 0xe5};
+  Uc8279X4Driver driver;
+  EpdBus bus;
+  driver.begin(bus);
+  const auto bw = frame(7), lsb = frame(8), msb = frame(9);
+  for (auto mode : {GrayscaleMode::Overlay, GrayscaleMode::Absolute, GrayscaleMode::Direct}) {
+    driver.beginGrayscale(bus, bw.data(), mode, RefreshMode::Half, false);
+    driver.copyGrayscaleLsb(bus, lsb.data());
+    driver.copyGrayscaleMsb(bus, msb.data());
+    driver.displayGray(bus, bw.data(), false, nullptr, false);
+    driver.cleanupGrayscaleBuffers(bus, bw.data());
+    driver.display(bus, bw.data(), nullptr, RefreshMode::Fast, false);
+    driver.display(bus, bw.data(), nullptr, RefreshMode::Fast, false);
+  }
+  driver.deepSleep(bus);
+  unsigned gcRefreshes = 0;
+  for (size_t i = 0; i < bus.writes.size(); ++i) {
+    const auto& w = bus.writes[i];
+    assert(std::find(stockCommands.begin(), stockCommands.end(), w.command) != stockCommands.end());
+    if (w.command != 0x12) continue;
+    // A refresh preceded by CDI 0x97 + TSSET 0x1E is a GC; it must not run OTP.
+    size_t j = i;
+    while (j > 0 && bus.writes[j].command != 0x50) --j;
+    if (bus.writes[j].bytes != Bytes({0x97})) continue;
+    const auto tsset = std::find_if(bus.writes.begin() + j, bus.writes.begin() + i,
+                                    [](const auto& x) { return x.command == 0xe5; });
+    if (tsset == bus.writes.begin() + i || tsset->bytes != Bytes({0x1e})) continue;
+    ++gcRefreshes;
+    const auto psr = std::find_if(bus.writes.rbegin() + (bus.writes.size() - i), bus.writes.rend(),
+                                  [](const auto& x) { return x.command == 0x00; });
+    assert(psr->bytes[0] == (expectedGcBank() != nullptr ? 0x37 : 0x17));
+  }
+  assert(gcRefreshes >= 3);
+  free(driver._grayBase);
+  BoardConfig::ACTIVE.displayControllerVariant = 0x68;
+}
+
 static void testStickyAbsolute() {
   BoardConfig::ACTIVE.board = BoardConfig::Board::Sticky;
   auto& driver = static_cast<Ssd1677Driver&>(ssd1677Driver());
@@ -625,6 +784,8 @@ int main(int argc, char** argv) {
   }
   testUc8179GrayShadeSplit();
   testUc8279X4WaveformSelection();
+  testUc8279X4GcWaveform();
+  testUc8279X4GcSessionCommands();
   testDirectSleep<Uc8179Driver>();
   testDirectSleep<Uc8279X4Driver>();
   testUltraChipAbsolute<Uc8179Driver>(true, 0, false);

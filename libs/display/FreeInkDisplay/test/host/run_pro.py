@@ -20,16 +20,21 @@ with tempfile.TemporaryDirectory(prefix="freeink-pro-test-") as directory:
     shutil.copy2(LIB / "src/FreeInkDisplay.cpp", root / "src/FreeInkDisplay.cpp")
     shutil.copy2(LIB / "include/FreeInkDisplay.h", root / "include/FreeInkDisplay.h")
     shutil.copy2(LIB / "include/GrayscaleCapabilities.h", root / "include/GrayscaleCapabilities.h")
-    for name in ("Ssd1677Luts.h", "Uc8279X3Luts.h", "UltraChipDirectGrayLuts.h"):
+    for name in ("Ssd1677Luts.h", "Uc8279X3Luts.h", "Uc8279X4GcLuts.h", "UltraChipDirectGrayLuts.h"):
         shutil.copy2(LIB / f"src/lut/{name}", root / f"src/lut/{name}")
     for name in ("Arduino.h", "BoardConfig.h", "SPI.h", "esp_heap_caps.h"):
         shutil.copy2(HERE / "pro_stubs" / name, root / name)
     shutil.copy2(HERE / "pro_stubs/EpdBus.h", root / "src/bus/EpdBus.h")
-    for single in (False, True):
-        exe = root / ("single" if single else "dual")
+    # (single buffer, FREEINK_UC8279X4_GC_WAVEFORM); None builds the driver default (merged).
+    builds = ((False, None), (True, None), (False, 0), (False, 1), (False, 2))
+    for single, waveform in builds:
+        exe = root / f"{'single' if single else 'dual'}-gc{waveform}"
         command = [os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra",
                    "-Wno-unused-parameter", "-Wno-unused-function", "-DBOARD_HAS_PSRAM=1",
                    "-DARDUINO=1", "-DFREEINK_DEVICE_METALIO_EINK4=1", "-I"+str(root), "-I"+str(root / "include")]
+        command += [f"-DEXPECTED_GC_WAVEFORM={2 if waveform is None else waveform}"]
+        if waveform is not None:
+            command += [f"-DFREEINK_UC8279X4_GC_WAVEFORM={waveform}"]
         if single:
             command += ["-DEINK_DISPLAY_SINGLE_BUFFER_MODE=1"]
         command += [str(HERE / "test_pro.cpp"), str(root / "src/FreeInkDisplay.cpp")]

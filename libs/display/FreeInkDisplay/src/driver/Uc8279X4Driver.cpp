@@ -6,6 +6,14 @@
 #include <string.h>
 
 #include "../lut/Uc8279X3Luts.h"
+#include "../lut/Uc8279X4GcLuts.h"
+
+// B/W GC (Full/Half) waveform: 0 = the controller's OTP GC, 1 = the register
+// copy of that OTP bank (one-time validation), 2 = the merged-payback bank.
+// The register banks come from a LUT_VER 0x02 panel; other panels keep OTP.
+#ifndef FREEINK_UC8279X4_GC_WAVEFORM
+#define FREEINK_UC8279X4_GC_WAVEFORM 2
+#endif
 
 // Orientation of the visible-row stream, switchable per build for field A/B.
 // Defaults (0/0) = the stock convention, HARDWARE-CONFIRMED upright on a field
@@ -208,6 +216,35 @@ constexpr GrayBank kQualityBank = makeQualityBank();
 // table order (inx-pro's empirically found assignment for this panel).
 constexpr uint8_t kQualityLutReg[5] = {0x20, 0x21, 0x23, 0x22, 0x24};
 
+constexpr uint8_t GC_LUT_PANEL_VARIANT = 0x02;
+constexpr char kOtpDrfTag[] = " 8279x4_DRF";
+#if FREEINK_UC8279X4_GC_WAVEFORM == 0
+constexpr const Uc8279X4GcLut* kGcLuts = nullptr;
+constexpr const char* kGcDrfTag = kOtpDrfTag;
+#elif FREEINK_UC8279X4_GC_WAVEFORM == 1
+constexpr const Uc8279X4GcLut* kGcLuts = kUc8279X4GcControl;
+constexpr const char* kGcDrfTag = " 8279x4_GC_CONTROL_DRF";
+#elif FREEINK_UC8279X4_GC_WAVEFORM == 2
+constexpr const Uc8279X4GcLut* kGcLuts = kUc8279X4GcMerged;
+constexpr const char* kGcDrfTag = " 8279x4_GC_MERGED_DRF";
+#else
+#error "FREEINK_UC8279X4_GC_WAVEFORM must be 0 (OTP), 1 (control) or 2 (merged)"
+#endif
+
+// The register GC bank for the probed panel, or nullptr to run the OTP GC.
+const Uc8279X4GcLut* gcRegisterLuts() {
+  return BoardConfig::ACTIVE.displayControllerVariant == GC_LUT_PANEL_VARIANT ? kGcLuts : nullptr;
+}
+
+const char* bwDrfTag(bool partial) { return !partial && gcRegisterLuts() != nullptr ? kGcDrfTag : kOtpDrfTag; }
+
+void uploadGcLuts(EpdBus& bus, const Uc8279X4GcLut* luts) {
+  for (uint8_t i = 0; i < UC8279X4_GC_LUT_COUNT; i++) {
+    bus.cmd(luts[i].reg);
+    bus.data(luts[i].data, UC8279X4_GC_LUT_LEN);
+  }
+}
+
 }  // namespace
 
 const Uc8279X4Config& uc8279X4DefaultConfig() {
@@ -409,7 +446,7 @@ bool Uc8279X4Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t*
   }
   // Same differential model as the UC8179 sibling: only an EXPLICIT Fast request
   // uses the PTIN/PTOUT DU partial (OLD plane = previous displayed frame). Full
-  // AND Half both run the clearing OTP GC waveform — but they seed the OLD plane
+  // AND Half both run the clearing GC waveform — but they seed the OLD plane
   // DIFFERENTLY (this is the load-bearing distinction, copied from UC8179):
   //   * Half = charge SCRUB: OLD = complement of the target, so EVERY pixel
   //     (including white background) is forced through a transition cell and no
@@ -432,7 +469,11 @@ bool Uc8279X4Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t*
 
   streamPlane(bus, CMD_DTM2, fb);
   if (!fast) {
-    if (scrub) {
+    if (gcRegisterLuts() != nullptr) {
+      // Register GC rows ignore OLD. OLD = target keeps every pixel on the
+      // unambiguous WW (0x21) / KK (0x24) rows, which still drive a full GC.
+      streamPlane(bus, CMD_DTM1, fb);
+    } else if (scrub) {
       // Half scrub: OLD = ~target -> every pixel transitions, purging idle charge.
       streamPlane(bus, CMD_DTM1, fb, /*invert=*/true);
     } else {
@@ -462,6 +503,9 @@ void Uc8279X4Driver::startBwRefresh(EpdBus& bus, bool fast) {
   // writes the 1-byte CDI on EVERY refresh, 0x97 full / 0xD7 partial — then
   // CCSET/TSSET (+ PFS/gate-scan on partial), PON, the partial window, and a
   // PSR rewrite between PON and DRF (same latch behavior as the AA path).
+  // A register GC keeps that sequence and only latches REG=1 and uploads its
+  // bank before DRF, the AA path's PSR -> LUT -> DRF order.
+  const Uc8279X4GcLut* gcLuts = fast ? nullptr : gcRegisterLuts();
   bus.cmd(CMD_VCOM_DATA_INTERVAL);
   bus.data(fast ? _cfg.cdiBwFast : _cfg.cdiBwFull);
   bus.cmd(CMD_CCSET);
@@ -497,8 +541,9 @@ void Uc8279X4Driver::startBwRefresh(EpdBus& bus, bool fast) {
     bus.data(0x01);
   }
   bus.cmd(CMD_PANEL_SETTING);
-  bus.data(static_cast<uint8_t>(_cfg.psr0 & 0xDF));  // REG cleared -> OTP (0x13)
+  bus.data(gcLuts != nullptr ? _cfg.psr0 : static_cast<uint8_t>(_cfg.psr0 & 0xDF));  // REG=1 register / REG=0 OTP
   bus.data(_cfg.psr1);
+  if (gcLuts != nullptr) uploadGcLuts(bus, gcLuts);
   bus.cmd(CMD_DISPLAY_REFRESH);
   // Confirm the waveform started (BUSY dropped) before returning, so
   // displayFinish() only rides out the completion edge.
@@ -513,7 +558,7 @@ void Uc8279X4Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
   if (!_pendingRefresh) return;
   _pendingRefresh = false;
 
-  bus.waitRefreshComplete(" 8279x4_DRF");
+  bus.waitRefreshComplete(bwDrfTag(_pendingPartial));
   if (_pendingPartial) bus.cmd(CMD_PARTIAL_OUT);
 
   // Sync the OLD plane (0x10) with the just-displayed frame so the NEXT partial

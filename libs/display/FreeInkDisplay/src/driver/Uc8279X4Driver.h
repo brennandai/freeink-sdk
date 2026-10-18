@@ -17,8 +17,9 @@
 // required — see displayStart), and orientation all confirmed on hardware.
 //
 // Same KW differential paradigm as the UC8179 sibling: DTM1 (0x10) = OLD plane,
-// DTM2 (0x13) = NEW plane, OTP waveforms for B/W (PSR REG=0 at refresh),
-// external 5x49 LUTs for AA grayscale (REG=1). BUSY_N is low while busy;
+// DTM2 (0x13) = NEW plane, OTP waveforms for B/W DU (PSR REG=0 at refresh),
+// external 5x49 LUTs for AA grayscale and, on LUT_VER 0x02, the B/W GC
+// (REG=1; FREEINK_UC8279X4_GC_WAVEFORM selects the bank). BUSY_N is low while busy;
 // production waits one tick and then polls until it returns HIGH.
 
 #include "PanelDriver.h"
@@ -26,8 +27,8 @@
 namespace freeink {
 
 struct Uc8279X4Config {
-  // PSR (0x00) byte 0 as written at init and for the AA path (REG bit5=1,
-  // external LUT). Built-in refreshes re-assert (psr0 & 0xDF) = REG=0 -> OTP.
+  // PSR (0x00) byte 0 as written at init and for the AA and register-GC paths
+  // (REG bit5=1, external LUT). OTP refreshes re-assert (psr0 & 0xDF) = REG=0.
   uint8_t psr0;
   // PSR (0x00) byte 1.
   uint8_t psr1;
