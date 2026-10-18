@@ -536,9 +536,19 @@ static Bytes commandsOf(const EpdBus& bus) {
   return commands;
 }
 
+// The stock DU a register GC runs first after PON so the controller holds the
+// OTP drive settings rather than its MTP power-on defaults.
+static Bytes primeCommands() { return {0x50, 0xe0, 0xe5, 0x03, 0xe1, 0x04, 0x91, 0x90, 0x00, 0x12, 0x92}; }
+
 static Bytes gcCommands(bool powerOn, bool registerGc) {
-  Bytes expected = {0x13, 0x10, 0x50, 0xe0, 0xe5};
-  if (powerOn) expected.push_back(0x04);
+  Bytes expected = {0x13, 0x10};
+  const bool prime = powerOn && registerGc;
+  if (prime) {
+    const Bytes primeDu = primeCommands();
+    expected.insert(expected.end(), primeDu.begin(), primeDu.end());
+  }
+  for (uint8_t command : {0x50, 0xe0, 0xe5}) expected.push_back(command);
+  if (powerOn && !prime) expected.push_back(0x04);
   expected.push_back(0x00);
   if (registerGc)
     for (uint8_t reg = 0x20; reg <= 0x24; ++reg) expected.push_back(reg);
@@ -602,6 +612,11 @@ static void testUc8279X4GcWaveform() {
     driver.display(bus, page.data(), nullptr, RefreshMode::Fast, false);
     assert(commandsOf(bus) == gcCommands(true, registerGc));
     assert(lastPlane(bus, 0x13).size() == 60000);
+    if (registerGc) {
+      // The priming DU runs the OTP partial (REG cleared) before the register GC.
+      const auto psr = std::find_if(bus.writes.begin(), bus.writes.end(), [](const auto& w) { return w.command == 0x00; });
+      assert(psr != bus.writes.end() && psr->bytes == Bytes({0x17, 0x4d}));
+    }
     assertGcSeed(bus, page, registerGc, RefreshMode::Fast);
     checkGcRegisters(bus, registerGc, true);
     for (auto mode : {RefreshMode::Full, RefreshMode::Half}) {

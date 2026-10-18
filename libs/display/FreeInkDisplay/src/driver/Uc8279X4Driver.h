@@ -115,6 +115,7 @@ class Uc8279X4Driver : public PanelDriver {
  private:
   void initController(EpdBus& bus);
   void startBwRefresh(EpdBus& bus, bool fast, bool strongGc = false);
+  void primeOtpSettings(EpdBus& bus);
   // Stream a framebuffer into a RAM plane: 0xFF padding for gates before the
   // visible offset, visible rows in the stock convention (forward order, bytes
   // as-is; FREEINK_UC8279X4_ROWREV/XMIRROR can flip either axis for future
@@ -169,6 +170,8 @@ class Uc8279X4Driver : public PanelDriver {
   // for the next GC regardless, so a dark or gray image clears fully.
   bool _strongGcPending = true;
   bool _quickGcNext = false;
+  // True once an OTP refresh has loaded its drive settings since the last PON.
+  bool _otpSettingsLoaded = false;
   // Async split state (see Uc8179Driver for the contract).
   bool _pendingRefresh = false;
   bool _pendingTurnOff = false;

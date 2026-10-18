@@ -438,6 +438,7 @@ void Uc8279X4Driver::powerOnIfNeeded(EpdBus& bus, const char* tag) {
   bus.cmd(CMD_POWER_ON);
   bus.waitBusy(tag);
   _isScreenOn = true;
+  _otpSettingsLoaded = false;  // PON reloads the MTP power-on defaults
 }
 
 bool Uc8279X4Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) {
@@ -485,6 +486,7 @@ bool Uc8279X4Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t*
       // Register GC rows ignore OLD. OLD = target keeps every pixel on the
       // unambiguous WW (0x21) / KK (0x24) rows, which still drive a full GC.
       streamPlane(bus, CMD_DTM1, fb);
+      if (!_otpSettingsLoaded || !_isScreenOn) primeOtpSettings(bus);
     } else if (scrub) {
       // Half scrub: OLD = ~target -> every pixel transitions, purging idle charge.
       streamPlane(bus, CMD_DTM1, fb, /*invert=*/true);
@@ -562,6 +564,7 @@ void Uc8279X4Driver::startBwRefresh(EpdBus& bus, bool fast, bool strongGc) {
   bus.data(_cfg.psr1);
   if (gcLuts != nullptr) uploadGcLuts(bus, gcLuts);
   bus.cmd(CMD_DISPLAY_REFRESH);
+  if (gcLuts == nullptr) _otpSettingsLoaded = true;
   // Confirm the waveform started (BUSY dropped) before returning, so
   // displayFinish() only rides out the completion edge.
   {
@@ -569,6 +572,16 @@ void Uc8279X4Driver::startBwRefresh(EpdBus& bus, bool fast, bool strongGc) {
     const unsigned long t0 = millis();
     while (digitalRead(busyPin) == HIGH && millis() - t0 < 50) delay(1);
   }
+}
+
+// A register GC runs with whatever drive settings the controller holds. After
+// PON those are the weak MTP defaults until an OTP refresh loads its record,
+// so run the stock DU once on OLD = NEW = target: it changes no pixel but
+// leaves the same settings every ordinary page turn does.
+void Uc8279X4Driver::primeOtpSettings(EpdBus& bus) {
+  startBwRefresh(bus, true);
+  bus.waitRefreshComplete(" 8279x4_PRIME_DRF");
+  bus.cmd(CMD_PARTIAL_OUT);
 }
 
 void Uc8279X4Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
