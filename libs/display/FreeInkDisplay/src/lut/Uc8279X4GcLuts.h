@@ -43,6 +43,17 @@ constexpr Uc8279X4GcLut kUc8279X4GcMerged[UC8279X4_GC_LUT_COUNT] = {
     {0x24, {0x01, 0x8D, 0x8D, 0x4D, 0x4D, 0x01, 0x01}},  // KK: final black
 };
 
+// Strong merged payback for leaving dark or grayscale screens (wake, sleep,
+// images): invert (52 frames), rest (4), then one continuous 52-frame push
+// (108 frames). 52-frame drives stay within the OTP's own 60-frame cold GC.
+constexpr Uc8279X4GcLut kUc8279X4GcMergedStrong[UC8279X4_GC_LUT_COUNT] = {
+    {0x20, {0x01, 0x34, 0x04, 0x1A, 0x1A, 0x01, 0x01}},  // VCOM
+    {0x21, {0x01, 0x74, 0x04, 0x9A, 0x9A, 0x01, 0x01}},  // WW: final white
+    {0x22, {0x01, 0x74, 0x04, 0x9A, 0x9A, 0x01, 0x01}},  // KW: final white
+    {0x23, {0x01, 0xB4, 0x04, 0x5A, 0x5A, 0x01, 0x01}},  // WK: final black
+    {0x24, {0x01, 0xB4, 0x04, 0x5A, 0x5A, 0x01, 0x01}},  // KK: final black
+};
+
 namespace uc8279x4gc {
 
 constexpr uint8_t GROUP_LEN = 7;
@@ -127,5 +138,7 @@ static_assert(uc8279x4gc::bankIsSafe(kUc8279X4GcControl), "control GC bank must 
 static_assert(uc8279x4gc::bankIsSafe(kUc8279X4GcMerged), "merged GC bank must be DC balanced and well formed");
 static_assert(!uc8279x4gc::bankEndsWithSinglePush(kUc8279X4GcControl), "control keeps the factory staged ending");
 static_assert(uc8279x4gc::bankEndsWithSinglePush(kUc8279X4GcMerged), "merged GC must end with one continuous push");
+static_assert(uc8279x4gc::bankIsSafe(kUc8279X4GcMergedStrong), "strong GC bank must be DC balanced and well formed");
+static_assert(uc8279x4gc::bankEndsWithSinglePush(kUc8279X4GcMergedStrong), "strong GC must end with one continuous push");
 
 }  // namespace freeink

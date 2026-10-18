@@ -80,6 +80,7 @@ class Uc8279X4Driver : public PanelDriver {
 
   void requestResync(uint8_t settlePasses) override;
   void skipInitialResync() override;
+  void preferQuickClean() override;
 
   // --- 4-level grayscale (anti-aliasing) ---
   // External-LUT path (ported from the UC8179 sibling). CrossPoint supplies DELTA
@@ -113,7 +114,7 @@ class Uc8279X4Driver : public PanelDriver {
 
  private:
   void initController(EpdBus& bus);
-  void startBwRefresh(EpdBus& bus, bool fast);
+  void startBwRefresh(EpdBus& bus, bool fast, bool strongGc = false);
   // Stream a framebuffer into a RAM plane: 0xFF padding for gates before the
   // visible offset, visible rows in the stock convention (forward order, bytes
   // as-is; FREEINK_UC8279X4_ROWREV/XMIRROR can flip either axis for future
@@ -163,10 +164,16 @@ class Uc8279X4Driver : public PanelDriver {
   // by the next B/W displayStart to RE-DRIVE every pixel to its target (DTM1 =
   // ~newframe), scrubbing the residue with a cheap DU (no GC flash).
   bool _redriveAfterGray = false;
+  // Register GCs use the strong bank unless preferQuickClean() marked a routine
+  // page-turn cleanup; boot/wake and any grayscale screen force the strong bank
+  // for the next GC regardless, so a dark or gray image clears fully.
+  bool _strongGcPending = true;
+  bool _quickGcNext = false;
   // Async split state (see Uc8179Driver for the contract).
   bool _pendingRefresh = false;
   bool _pendingTurnOff = false;
   bool _pendingPartial = false;
+  bool _pendingStrongGc = false;
 };
 
 PanelDriver& uc8279X4Driver();

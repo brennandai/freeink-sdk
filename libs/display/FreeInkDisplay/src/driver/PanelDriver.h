@@ -194,6 +194,9 @@ class PanelDriver {
   // --- optional, controller-specific hooks (no-op by default) ---
   virtual void requestResync(uint8_t settlePasses) { (void)settlePasses; }
   virtual void skipInitialResync() {}
+  // One-shot hint: the next clean refresh is a routine page-turn cleanup, so a
+  // driver may use a quicker clearing waveform for it.
+  virtual void preferQuickClean() {}
   // Content-polarity hint: true while the facade is rendering inverted (dark
   // background) frames. Differential drivers idle unchanged pixels, so on a
   // dark background the residue of every white->black transition parks in the

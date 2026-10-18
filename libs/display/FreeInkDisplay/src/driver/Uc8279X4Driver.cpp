@@ -220,23 +220,34 @@ constexpr uint8_t GC_LUT_PANEL_VARIANT = 0x02;
 constexpr char kOtpDrfTag[] = " 8279x4_DRF";
 #if FREEINK_UC8279X4_GC_WAVEFORM == 0
 constexpr const Uc8279X4GcLut* kGcLuts = nullptr;
+constexpr const Uc8279X4GcLut* kGcStrongLuts = nullptr;
 constexpr const char* kGcDrfTag = kOtpDrfTag;
+constexpr const char* kGcStrongDrfTag = kOtpDrfTag;
 #elif FREEINK_UC8279X4_GC_WAVEFORM == 1
 constexpr const Uc8279X4GcLut* kGcLuts = kUc8279X4GcControl;
+constexpr const Uc8279X4GcLut* kGcStrongLuts = kUc8279X4GcControl;
 constexpr const char* kGcDrfTag = " 8279x4_GC_CONTROL_DRF";
+constexpr const char* kGcStrongDrfTag = kGcDrfTag;
 #elif FREEINK_UC8279X4_GC_WAVEFORM == 2
 constexpr const Uc8279X4GcLut* kGcLuts = kUc8279X4GcMerged;
+constexpr const Uc8279X4GcLut* kGcStrongLuts = kUc8279X4GcMergedStrong;
 constexpr const char* kGcDrfTag = " 8279x4_GC_MERGED_DRF";
+constexpr const char* kGcStrongDrfTag = " 8279x4_GC_MERGED_STRONG_DRF";
 #else
 #error "FREEINK_UC8279X4_GC_WAVEFORM must be 0 (OTP), 1 (control) or 2 (merged)"
 #endif
 
 // The register GC bank for the probed panel, or nullptr to run the OTP GC.
-const Uc8279X4GcLut* gcRegisterLuts() {
-  return BoardConfig::ACTIVE.displayControllerVariant == GC_LUT_PANEL_VARIANT ? kGcLuts : nullptr;
+// `strong` selects the longer bank used to clear dark or grayscale screens.
+const Uc8279X4GcLut* gcRegisterLuts(bool strong) {
+  if (BoardConfig::ACTIVE.displayControllerVariant != GC_LUT_PANEL_VARIANT) return nullptr;
+  return strong ? kGcStrongLuts : kGcLuts;
 }
 
-const char* bwDrfTag(bool partial) { return !partial && gcRegisterLuts() != nullptr ? kGcDrfTag : kOtpDrfTag; }
+const char* bwDrfTag(bool partial, bool strong) {
+  if (partial || gcRegisterLuts(strong) == nullptr) return kOtpDrfTag;
+  return strong ? kGcStrongDrfTag : kGcDrfTag;
+}
 
 void uploadGcLuts(EpdBus& bus, const Uc8279X4GcLut* luts) {
   for (uint8_t i = 0; i < UC8279X4_GC_LUT_COUNT; i++) {
@@ -321,6 +332,7 @@ void Uc8279X4Driver::initController(EpdBus& bus) {
 }
 
 void Uc8279X4Driver::begin(EpdBus& bus) {
+  _strongGcPending = true;
   _directGrayOnPanel = false;
   _grayImagePass = false;
   _absoluteInput = false;
@@ -469,7 +481,7 @@ bool Uc8279X4Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t*
 
   streamPlane(bus, CMD_DTM2, fb);
   if (!fast) {
-    if (gcRegisterLuts() != nullptr) {
+    if (gcRegisterLuts(false) != nullptr) {
       // Register GC rows ignore OLD. OLD = target keeps every pixel on the
       // unambiguous WW (0x21) / KK (0x24) rows, which still drive a full GC.
       streamPlane(bus, CMD_DTM1, fb);
@@ -490,14 +502,19 @@ bool Uc8279X4Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t*
   // post-AA gray residue for this frame.
   _redriveAfterGray = false;
 
-  startBwRefresh(bus, fast);
+  // Only a hinted page-turn cleanup of a plain B/W page takes the quick bank.
+  const bool strongGc = !fast && (!_quickGcNext || _strongGcPending || turnOff);
+  _quickGcNext = false;
+  startBwRefresh(bus, fast, strongGc);
+  if (!fast) _strongGcPending = false;
   _pendingPartial = fast;
+  _pendingStrongGc = strongGc;
   _pendingTurnOff = turnOff;
   _pendingRefresh = true;
   return true;
 }
 
-void Uc8279X4Driver::startBwRefresh(EpdBus& bus, bool fast) {
+void Uc8279X4Driver::startBwRefresh(EpdBus& bus, bool fast, bool strongGc) {
   // Built-in refresh setup, byte-for-byte the stock FW trigger order (RE of
   // Factory.bin FUN_4214d050 partial / FUN_4214cfe8 full): CDI first — stock
   // writes the 1-byte CDI on EVERY refresh, 0x97 full / 0xD7 partial — then
@@ -505,7 +522,7 @@ void Uc8279X4Driver::startBwRefresh(EpdBus& bus, bool fast) {
   // PSR rewrite between PON and DRF (same latch behavior as the AA path).
   // A register GC keeps that sequence and only latches REG=1 and uploads its
   // bank before DRF, the AA path's PSR -> LUT -> DRF order.
-  const Uc8279X4GcLut* gcLuts = fast ? nullptr : gcRegisterLuts();
+  const Uc8279X4GcLut* gcLuts = fast ? nullptr : gcRegisterLuts(strongGc);
   bus.cmd(CMD_VCOM_DATA_INTERVAL);
   bus.data(fast ? _cfg.cdiBwFast : _cfg.cdiBwFull);
   bus.cmd(CMD_CCSET);
@@ -558,7 +575,7 @@ void Uc8279X4Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
   if (!_pendingRefresh) return;
   _pendingRefresh = false;
 
-  bus.waitRefreshComplete(bwDrfTag(_pendingPartial));
+  bus.waitRefreshComplete(bwDrfTag(_pendingPartial, _pendingStrongGc));
   if (_pendingPartial) bus.cmd(CMD_PARTIAL_OUT);
 
   // Sync the OLD plane (0x10) with the just-displayed frame so the NEXT partial
@@ -583,6 +600,8 @@ void Uc8279X4Driver::requestResync(uint8_t settlePasses) {
 }
 
 void Uc8279X4Driver::skipInitialResync() { _needFullClear = false; }
+
+void Uc8279X4Driver::preferQuickClean() { _quickGcNext = true; }
 
 void Uc8279X4Driver::deepSleep(EpdBus& bus) {
   _directGrayOnPanel = false;
@@ -759,6 +778,7 @@ void Uc8279X4Driver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, c
   // remains the strong purge.
   _directGrayOnPanel = _directGrayPass;
   _redriveAfterGray = !_directGrayPass;
+  _strongGcPending = true;
   if (_directGrayPass) _needFullClear = true;
   _grayImagePass = false;
   _absoluteInput = false;
@@ -772,6 +792,7 @@ void Uc8279X4Driver::displayGrayscaleBase(EpdBus& bus, const uint8_t* fb, Refres
   // previous / pending full clear), takes a real B/W activation via display().
   // Otherwise use stock's non-flashing prev->current transition.
   if (fallback != RefreshMode::Fast || !_grayRefreshedOnce || !_oldPlaneValid || _needFullClear) {
+    _strongGcPending = true;
     display(bus, fb, nullptr, fallback, turnOff);
     return;
   }

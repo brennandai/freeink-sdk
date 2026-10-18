@@ -273,6 +273,8 @@ class FreeInkDisplay {
   // Hint the X3 policy to run a one-shot full resync on next update.
   void requestResync(uint8_t settlePasses = 0);
   void skipInitialResync();
+  // One-shot hint that the next clean refresh is a routine page-turn cleanup.
+  void preferQuickClean();
   void beginDisplayWork();
   void abortPostRefresh();
   bool postRefreshAborted() const;

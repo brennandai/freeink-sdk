@@ -977,6 +977,10 @@ void FreeInkDisplay::skipInitialResync() {
   if (_driver) _driver->skipInitialResync();
 }
 
+void FreeInkDisplay::preferQuickClean() {
+  if (_driver) _driver->preferQuickClean();
+}
+
 void FreeInkDisplay::beginDisplayWork() {
   if (_driver) _driver->beginDisplayWork();
 }

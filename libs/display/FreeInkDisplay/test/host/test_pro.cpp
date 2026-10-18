@@ -522,9 +522,11 @@ static void testUc8279X4WaveformSelection() {
   free(driver._grayBase);
 }
 
-static const Uc8279X4GcLut* expectedGcBank() {
+// `strong` = the default bank; only a hinted page-turn cleanup of a plain B/W
+// page (no boot/wake, sleep paint or preceding gray screen) runs the quick one.
+static const Uc8279X4GcLut* expectedGcBank(bool strong) {
   if (EXPECTED_GC_WAVEFORM == 1) return kUc8279X4GcControl;
-  if (EXPECTED_GC_WAVEFORM == 2) return kUc8279X4GcMerged;
+  if (EXPECTED_GC_WAVEFORM == 2) return strong ? kUc8279X4GcMergedStrong : kUc8279X4GcMerged;
   return nullptr;
 }
 
@@ -568,13 +570,13 @@ static void assertGcSeed(const EpdBus& bus, const Bytes& page, bool registerGc, 
 }
 
 // Every value this GC path writes must be one the stock driver already sends.
-static void checkGcRegisters(const EpdBus& bus, bool registerGc) {
+static void checkGcRegisters(const EpdBus& bus, bool registerGc, bool strong) {
   assert(lastRegister(bus, 0x50) == 0x97);
   assert(lastRegister(bus, 0xe0) == 0x02);
   assert(lastRegister(bus, 0xe5) == 0x1e);
   const auto& psr = lastPlane(bus, 0x00);
   assert(psr == Bytes({uint8_t(registerGc ? 0x37 : 0x17), 0x4d}));
-  const Uc8279X4GcLut* bank = registerGc ? expectedGcBank() : nullptr;
+  const Uc8279X4GcLut* bank = registerGc ? expectedGcBank(strong) : nullptr;
   unsigned luts = 0;
   for (const auto& w : bus.writes) {
     if (w.command < 0x20 || w.command > 0x24) continue;
@@ -591,7 +593,7 @@ static void testUc8279X4GcWaveform() {
   const auto page = frame(51);
   for (uint8_t variant : {0x02, 0x68}) {
     BoardConfig::ACTIVE.displayControllerVariant = variant;
-    const bool registerGc = variant == 0x02 && expectedGcBank() != nullptr;
+    const bool registerGc = variant == 0x02 && expectedGcBank(false) != nullptr;
     Uc8279X4Driver driver;
     EpdBus bus;
     driver.begin(bus);
@@ -601,13 +603,16 @@ static void testUc8279X4GcWaveform() {
     assert(commandsOf(bus) == gcCommands(true, registerGc));
     assert(lastPlane(bus, 0x13).size() == 60000);
     assertGcSeed(bus, page, registerGc, RefreshMode::Fast);
-    checkGcRegisters(bus, registerGc);
+    checkGcRegisters(bus, registerGc, true);
     for (auto mode : {RefreshMode::Full, RefreshMode::Half}) {
-      bus.clear();
-      driver.display(bus, page.data(), nullptr, mode, false);
-      assert(commandsOf(bus) == gcCommands(false, registerGc));
-      checkGcRegisters(bus, registerGc);
-      assertGcSeed(bus, page, registerGc, mode);
+      for (bool quick : {false, true}) {
+        bus.clear();
+        if (quick) driver.preferQuickClean();
+        driver.display(bus, page.data(), nullptr, mode, false);
+        assert(commandsOf(bus) == gcCommands(false, registerGc));
+        checkGcRegisters(bus, registerGc, !quick);
+        assertGcSeed(bus, page, registerGc, mode);
+      }
     }
     // The B/W DU stays on the OTP bank with its stock registers.
     bus.clear();
@@ -621,6 +626,7 @@ static void testUc8279X4GcWaveform() {
     Bytes sleepPaint = gcCommands(false, registerGc);
     sleepPaint.push_back(0x02);
     assert(commandsOf(bus) == sleepPaint && !driver._isScreenOn);
+    checkGcRegisters(bus, registerGc, true);
     driver.deepSleep(bus);
     assert(bus.writes.back().command == 0x07 && bus.writes.back().bytes == Bytes({0xa5}));
     // A wake GC powers the panel on before the PSR latch and the bank upload.
@@ -628,7 +634,19 @@ static void testUc8279X4GcWaveform() {
     bus.clear();
     driver.display(bus, page.data(), nullptr, RefreshMode::Full, false);
     assert(commandsOf(bus) == gcCommands(true, registerGc));
-    checkGcRegisters(bus, registerGc);
+    checkGcRegisters(bus, registerGc, true);
+    // After a grayscale screen even a hinted cleanup is strong once, then quick.
+    const auto lsb = frame(52), msb = frame(53);
+    driver.beginGrayscale(bus, page.data(), GrayscaleMode::Overlay, RefreshMode::Fast, false);
+    driver.copyGrayscaleLsb(bus, lsb.data());
+    driver.copyGrayscaleMsb(bus, msb.data());
+    driver.displayGray(bus, page.data(), false, nullptr, false);
+    for (bool strong : {true, false}) {
+      bus.clear();
+      driver.preferQuickClean();
+      driver.display(bus, page.data(), nullptr, RefreshMode::Half, false);
+      checkGcRegisters(bus, registerGc, strong);
+    }
     free(driver._grayBase);
   }
   BoardConfig::ACTIVE.displayControllerVariant = 0x68;
@@ -669,7 +687,7 @@ static void testUc8279X4GcSessionCommands() {
     ++gcRefreshes;
     const auto psr = std::find_if(bus.writes.rbegin() + (bus.writes.size() - i), bus.writes.rend(),
                                   [](const auto& x) { return x.command == 0x00; });
-    assert(psr->bytes[0] == (expectedGcBank() != nullptr ? 0x37 : 0x17));
+    assert(psr->bytes[0] == (expectedGcBank(false) != nullptr ? 0x37 : 0x17));
   }
   assert(gcRefreshes >= 3);
   free(driver._grayBase);
