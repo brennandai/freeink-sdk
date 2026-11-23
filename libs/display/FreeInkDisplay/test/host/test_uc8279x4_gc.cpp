@@ -226,11 +226,87 @@ static void testGcAfterGray(GrayscaleMode mode, bool onePassText) {
   free(driver._grayBase);
 }
 
+static void testCleanLeavingDirectGray(BoardConfig::Board board, uint8_t variant) {
+  BoardConfig::ACTIVE.board = board;
+  BoardConfig::ACTIVE.displayControllerVariant = variant;
+  const bool registerGc = board == BoardConfig::Board::XteinkX4Pro && variant == 2 && expectedGcBank(false);
+  const auto page = frame(37), next = frame(62), lo = frame(19), hi = frame(111);
+  const Bytes blank(60000, 0xff);
+  Bytes destination = blank;
+  std::copy(page.begin(), page.end(), destination.begin() + 12000);
+  FreeInkDisplay display(1, 2, 3, 4, 5, 6);
+  Uc8279X4Driver driver;
+  display._driver = &driver;
+  auto& bus = display._bus;
+  driver.begin(bus);
+  for (auto mode : {RefreshMode::Half, RefreshMode::Full, RefreshMode::Fast}) {
+    for (bool poweredOff : {false, true}) {
+      bus.clear();
+      driver.beginGrayscale(bus, page.data(), GrayscaleMode::Direct, RefreshMode::Fast, false);
+      driver.copyGrayscaleLsb(bus, lo.data());
+      driver.copyGrayscaleMsb(bus, hi.data());
+      driver.displayGray(bus, page.data(), poweredOff, nullptr, false);
+      const auto grayCommands = commandsOf(bus);
+      assert(std::count(grayCommands.begin(), grayCommands.end(), 0x12) == 1);
+      assert(lastPlane(bus, 0x00) == Bytes({0x37, 0x4d}) && lastRegister(bus, 0x50) == 0x97);
+      assertScrubSeed(lastPlane(bus, 0x10), lo);
+      assertScrubSeed(lastPlane(bus, 0x13), hi);
+      driver.cleanupGrayscaleBuffers(bus, next.data());
+      bus.clear();
+
+      if (mode == RefreshMode::Half) display.preferQuickClean();
+      const bool deferred = driver.displayStart(bus, page.data(), nullptr, mode, false);
+      assert(deferred);
+      driver.displayFinish(bus, page.data());
+      Bytes expected = {0x10, 0x13};
+      Bytes du = primeCommands();
+      if (!poweredOff) du.erase(std::find(du.begin(), du.end(), 0x04));
+      expected.insert(expected.end(), du.begin(), du.end());
+      const auto gc = gcCommands(false, registerGc);
+      expected.insert(expected.end(), gc.begin(), gc.end());
+      assert(commandsOf(bus) == expected);
+      // The first activation exits the image waveform: B/W differential CDI,
+      // factory fast TSSET, OTP PSR after PON. Nothing from the image LUTs runs.
+      assert(bus.writes[2].bytes == Bytes{0xd7} && bus.writes[4].bytes == Bytes{0x5a});
+      const auto psr = std::find_if(bus.writes.begin(), bus.writes.end(), [](const auto& w) { return w.command == 0x00; });
+      assert(psr->bytes == Bytes({0x17, 0x4d}));
+      if (mode != RefreshMode::Fast && registerGc && EXPECTED_GC_WAVEFORM == 2) {
+        // No image selectors, target pattern, or changed pixels anywhere in the
+        // 600-gate scan. Only the subsequent strong GC may present the page.
+        assert(bus.writes[0].bytes == blank && bus.writes[1].bytes == blank);
+      } else {
+        // Preserve upstream's visible destination DU for requested Fast (even
+        // if promoted to a GC) and panels/builds outside the merged policy.
+        assertScrubSeed(bus.writes[0].bytes, page);
+        assert(bus.writes[1].bytes == destination);
+      }
+      const auto firstGcWrite = 2 + du.size();
+      assert(bus.writes[firstGcWrite].bytes == destination);
+      if (registerGc) assert(bus.writes[firstGcWrite + 1].bytes == destination);
+      checkGcRegisters(bus, registerGc, true);
+      assert(lastPlane(bus, 0x10) == destination);
+
+      // A second page uses the differential baseline just established; the
+      // next iteration must then be able to display a fresh Direct image.
+      bus.clear();
+      driver.display(bus, next.data(), nullptr, RefreshMode::Fast, false);
+      assert(commandsOf(bus) == Bytes({0x13, 0x50, 0xe0, 0xe5, 0x03, 0xe1, 0x91, 0x90, 0x00, 0x12, 0x92, 0x10}));
+      assert(lastPlane(bus, 0x00) == Bytes({0x17, 0x4d}));
+      assert(lastPlane(bus, 0x10) == lastPlane(bus, 0x13));
+      assert(std::equal(next.begin(), next.end(), lastPlane(bus, 0x10).begin() + 12000));
+    }
+  }
+  free(driver._grayBase);
+}
+
 void testUc8279X4Gc() {
   const auto saved = BoardConfig::ACTIVE;
   for (auto board : {BoardConfig::Board::XteinkX4Pro, BoardConfig::Board::XteinkX4Classic, BoardConfig::Board::XteinkX4})
     testGcOnBoard(board);
   testGcAfterGray(GrayscaleMode::Overlay, true);
   testGcAfterGray(GrayscaleMode::Absolute, false);
+  testCleanLeavingDirectGray(BoardConfig::Board::XteinkX4Pro, 0x02);
+  testCleanLeavingDirectGray(BoardConfig::Board::XteinkX4Pro, 0x03);
+  testCleanLeavingDirectGray(BoardConfig::Board::XteinkX4Classic, 0x02);
   BoardConfig::ACTIVE = saved;
 }

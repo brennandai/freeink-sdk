@@ -458,7 +458,7 @@ void Uc8279X4Driver::powerOnIfNeeded(EpdBus& bus, const char* tag) {
 
 bool Uc8279X4Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) {
   _textAa.invalidate();
-  const bool paintDestination = _directGrayOnPanel;
+  const bool leavingDirectGray = _directGrayOnPanel;
   _directGrayOnPanel = false;
   _grayImagePass = false;
   _absoluteInput = false;
@@ -479,12 +479,23 @@ bool Uc8279X4Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t*
   const bool scrub = (mode == RefreshMode::Half);
   const bool fast = (mode == RefreshMode::Fast) && !_needFullClear && _oldPlaneValid;
 
-  if (paintDestination) {
-    streamPlane(bus, CMD_DTM1, fb, true);
-    streamPlane(bus, CMD_DTM2, fb);
-    startBwRefresh(bus, true);
-    bus.waitRefreshComplete(" 8279x4_BW_TARGET_DRF");
-    bus.cmd(CMD_PARTIAL_OUT);
+  if (leavingDirectGray) {
+#if FREEINK_DEVICE_X4PRO
+    if (mode != RefreshMode::Fast && supportsPageTurnCleanup()) {
+      // Leave the image LUT via factory DU, with every pixel on its idle WW
+      // row. No destination bits reach the panel until after this activation.
+      bus.fillPlane(CMD_DTM1, 0xff, _tresH, _wb);
+      bus.fillPlane(CMD_DTM2, 0xff, _tresH, _wb);
+      primeOtpSettings(bus);
+    } else
+#endif
+    {
+      streamPlane(bus, CMD_DTM1, fb, true);
+      streamPlane(bus, CMD_DTM2, fb);
+      startBwRefresh(bus, true);
+      bus.waitRefreshComplete(" 8279x4_BW_TARGET_DRF");
+      bus.cmd(CMD_PARTIAL_OUT);
+    }
   }
 
   streamPlane(bus, CMD_DTM2, fb);
@@ -630,7 +641,7 @@ void Uc8279X4Driver::displayWindow(EpdBus& bus, const uint8_t* fb, const uint8_t
 #if FREEINK_DEVICE_X4PRO
 // A register GC runs with whatever drive settings the controller holds. After
 // PON they are the MTP defaults; the RC3 one-pass text and image packets can
-// also override them. Run the stock DU once on OLD = NEW = target to load its
+// also override them. Run the stock DU once on identical OLD and NEW to load its
 // OTP record without developing any pixels.
 void Uc8279X4Driver::primeOtpSettings(EpdBus& bus) {
   startBwRefresh(bus, true);
