@@ -301,6 +301,10 @@ class FreeInkDisplay {
   // Physical-pixel rectangle; restore=true removes the overlay from the retained gray image.
   bool displayRetainedGrayscaleOverlay(uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool restore = false);
   void skipInitialResync();
+  // True only when the selected panel has distinct quick and strong clean waveforms.
+  bool supportsPageTurnCleanup() const;
+  // One-shot hint that the next clean refresh is a routine page-turn cleanup.
+  void preferQuickClean();
   void beginDisplayWork();
   void abortPostRefresh();
   bool postRefreshAborted() const;

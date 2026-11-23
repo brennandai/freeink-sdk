@@ -19,8 +19,9 @@
 // required — see displayStart), and orientation all confirmed on hardware.
 //
 // Same KW differential paradigm as the UC8179 sibling: DTM1 (0x10) = OLD plane,
-// DTM2 (0x13) = NEW plane, OTP waveforms for B/W (PSR REG=0 at refresh),
-// external 5x49 LUTs for AA grayscale (REG=1). BUSY_N is low while busy;
+// DTM2 (0x13) = NEW plane, OTP waveforms for B/W DU (PSR REG=0 at refresh),
+// external 5x49 LUTs for AA grayscale and, on LUT_VER 0x02, the B/W GC
+// (REG=1; FREEINK_UC8279X4_GC_WAVEFORM selects the bank). BUSY_N is low while busy;
 // production waits one tick and then polls until it returns HIGH.
 
 #include "PanelDriver.h"
@@ -28,8 +29,8 @@
 namespace freeink {
 
 struct Uc8279X4Config {
-  // PSR (0x00) byte 0 as written at init and for the AA path (REG bit5=1,
-  // external LUT). Built-in refreshes re-assert (psr0 & 0xDF) = REG=0 -> OTP.
+  // PSR (0x00) byte 0 as written at init and for the AA and register-GC paths
+  // (REG bit5=1, external LUT). OTP refreshes re-assert (psr0 & 0xDF) = REG=0.
   uint8_t psr0;
   // PSR (0x00) byte 1.
   uint8_t psr1;
@@ -90,6 +91,10 @@ class Uc8279X4Driver : public PanelDriver {
 
   void requestResync(uint8_t settlePasses) override;
   void skipInitialResync() override;
+#if FREEINK_DEVICE_X4PRO
+  bool supportsPageTurnCleanup() const override;
+  void preferQuickClean() override;
+#endif
 
   // --- 4-level grayscale (anti-aliasing) ---
   // External-LUT path (ported from the UC8179 sibling). CrossPoint supplies DELTA
@@ -128,6 +133,9 @@ class Uc8279X4Driver : public PanelDriver {
   bool _readerRefresh = false;
   void initController(EpdBus& bus);
   void startBwRefresh(EpdBus& bus, bool fast);
+#if FREEINK_DEVICE_X4PRO
+  void primeOtpSettings(EpdBus& bus);
+#endif
   // Stream a framebuffer into a RAM plane: 0xFF padding for gates before the
   // visible offset, visible rows in the stock convention (forward order, bytes
   // as-is; FREEINK_UC8279X4_ROWREV/XMIRROR can flip either axis for future
@@ -177,6 +185,16 @@ class Uc8279X4Driver : public PanelDriver {
   // by the next B/W displayStart to RE-DRIVE every pixel to its target (DTM1 =
   // ~newframe), scrubbing the residue with a cheap DU (no GC flash).
   bool _redriveAfterGray = false;
+#if FREEINK_DEVICE_X4PRO
+  // Register GCs use the strong bank unless preferQuickClean() marked a routine
+  // page-turn cleanup; boot/wake and any grayscale screen force the strong bank
+  // for the next GC regardless, so a dark or gray image clears fully.
+  bool _strongGcPending = true;
+  bool _quickGcNext = false;
+  // True while the drive settings still match the last OTP refresh.
+  bool _otpSettingsLoaded = false;
+  bool _pendingStrongGc = false;
+#endif
   // Async split state (see Uc8179Driver for the contract).
   bool _pendingRefresh = false;
   bool _pendingTurnOff = false;

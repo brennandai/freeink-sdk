@@ -48,10 +48,13 @@ int main() {
                            Case{BoardConfig::DisplayController::UC8179, "UC8179"},
                            Case{BoardConfig::DisplayController::UC8279, "UC8279"}}) {
     BoardConfig::ACTIVE.displayController = item.controller;
+    BoardConfig::ACTIVE.displayControllerVariant = 0x02;
     FreeInkDisplay display(1, 2, 3, 4, 5, 6);
     assert(display.getControllerName() == nullptr);
+    assert(!display.supportsPageTurnCleanup());
     display.selectDriver();
     assert(!strcmp(display.getControllerName(), item.name));
+    assert(display.supportsPageTurnCleanup() == (item.controller == BoardConfig::DisplayController::UC8279));
     // A query reports the standing driver without reselecting or touching the bus.
     BoardConfig::ACTIVE.displayController = BoardConfig::DisplayController::SSD1677;
     assert(!strcmp(display.getControllerName(), item.name));

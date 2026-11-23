@@ -8,6 +8,16 @@
 #include <string.h>
 
 #include "../lut/Uc8279X3Luts.h"
+#if FREEINK_DEVICE_X4PRO
+#include "../lut/Uc8279X4GcLuts.h"
+
+// B/W GC (Full/Half) waveform: 0 = the controller's OTP GC, 1 = the register
+// copy of that OTP bank (one-time validation), 2 = the merged-payback bank.
+// The register banks come from a LUT_VER 0x02 panel; other panels keep OTP.
+#ifndef FREEINK_UC8279X4_GC_WAVEFORM
+#define FREEINK_UC8279X4_GC_WAVEFORM 2
+#endif
+#endif
 
 // Orientation of the visible-row stream, switchable per build for field A/B.
 // Defaults (0/0) = the stock convention, HARDWARE-CONFIRMED upright on a field
@@ -213,6 +223,49 @@ constexpr GrayBank kQualityBank = makeQualityBank();
 // absolute planes send dark gray as (DTM1, DTM2) = (0, 1), which selects 0x22.
 constexpr uint8_t kQualityLutReg[5] = {0x20, 0x21, 0x23, 0x22, 0x24};
 
+constexpr char kOtpDrfTag[] = " 8279x4_DRF";
+#if FREEINK_DEVICE_X4PRO
+constexpr uint8_t GC_LUT_PANEL_VARIANT = 0x02;
+#if FREEINK_UC8279X4_GC_WAVEFORM == 0
+constexpr const Uc8279X4GcLut* kGcLuts = nullptr;
+constexpr const Uc8279X4GcLut* kGcStrongLuts = nullptr;
+constexpr const char* kGcDrfTag = kOtpDrfTag;
+constexpr const char* kGcStrongDrfTag = kOtpDrfTag;
+#elif FREEINK_UC8279X4_GC_WAVEFORM == 1
+constexpr const Uc8279X4GcLut* kGcLuts = kUc8279X4GcControl;
+constexpr const Uc8279X4GcLut* kGcStrongLuts = kUc8279X4GcControl;
+constexpr const char* kGcDrfTag = " 8279x4_GC_CONTROL_DRF";
+constexpr const char* kGcStrongDrfTag = kGcDrfTag;
+#elif FREEINK_UC8279X4_GC_WAVEFORM == 2
+constexpr const Uc8279X4GcLut* kGcLuts = kUc8279X4GcMerged;
+constexpr const Uc8279X4GcLut* kGcStrongLuts = kUc8279X4GcMergedStrong;
+constexpr const char* kGcDrfTag = " 8279x4_GC_MERGED_DRF";
+constexpr const char* kGcStrongDrfTag = " 8279x4_GC_MERGED_STRONG_DRF";
+#else
+#error "FREEINK_UC8279X4_GC_WAVEFORM must be 0 (OTP), 1 (control) or 2 (merged)"
+#endif
+
+// The register GC bank for the probed panel, or nullptr to run the OTP GC.
+// `strong` selects the longer bank used to clear dark or grayscale screens.
+const Uc8279X4GcLut* gcRegisterLuts(bool strong) {
+  if (BoardConfig::ACTIVE.board != BoardConfig::Board::XteinkX4Pro ||
+      BoardConfig::ACTIVE.displayControllerVariant != GC_LUT_PANEL_VARIANT) return nullptr;
+  return strong ? kGcStrongLuts : kGcLuts;
+}
+
+const char* bwDrfTag(bool partial, bool strong) {
+  if (partial || gcRegisterLuts(strong) == nullptr) return kOtpDrfTag;
+  return strong ? kGcStrongDrfTag : kGcDrfTag;
+}
+
+void uploadGcLuts(EpdBus& bus, const Uc8279X4GcLut* luts) {
+  for (uint8_t i = 0; i < UC8279X4_GC_LUT_COUNT; i++) {
+    bus.cmd(luts[i].reg);
+    bus.data(luts[i].data, UC8279X4_GC_LUT_LEN);
+  }
+}
+#endif
+
 }  // namespace
 
 const Uc8279X4Config& uc8279X4DefaultConfig() {
@@ -291,6 +344,10 @@ void Uc8279X4Driver::initController(EpdBus& bus) {
 void Uc8279X4Driver::begin(EpdBus& bus) {
   _textAa.allocate(BoardConfig::ACTIVE.board == BoardConfig::Board::XteinkX4Pro || BoardConfig::isX4Classic(), _wb,
                    _h);
+#if FREEINK_DEVICE_X4PRO
+  _strongGcPending = true;
+  _quickGcNext = false;
+#endif
   _directGrayOnPanel = false;
   _grayImagePass = false;
   _absoluteInput = false;
@@ -394,6 +451,9 @@ void Uc8279X4Driver::powerOnIfNeeded(EpdBus& bus, const char* tag) {
   bus.cmd(CMD_POWER_ON);
   bus.waitBusy(tag);
   _isScreenOn = true;
+#if FREEINK_DEVICE_X4PRO
+  _otpSettingsLoaded = false;  // PON reloads MTP defaults
+#endif
 }
 
 bool Uc8279X4Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) {
@@ -413,18 +473,9 @@ bool Uc8279X4Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t*
     memcpy(_grayBase, fb, _bufferSize);
     _grayBaseValid = true;
   }
-  // Same differential model as the UC8179 sibling: only an EXPLICIT Fast request
-  // uses the PTIN/PTOUT DU partial (OLD plane = previous displayed frame). Full
-  // AND Half both run the clearing OTP GC waveform — but they seed the OLD plane
-  // DIFFERENTLY (this is the load-bearing distinction, copied from UC8179):
-  //   * Half = charge SCRUB: OLD = complement of the target, so EVERY pixel
-  //     (including white background) is forced through a transition cell and no
-  //     WW/BB pixel idles with stale AA charge. A white-seed GC only redraws
-  //     black-target pixels and leaves background ghost parked in WW — that was
-  //     the residual ghosting seen after fix9's white-seed Half.
-  //   * Full = absolute-from-white seed (the known clean full flash).
-  // Half is CrossPoint's periodic ghost-cleanup (every getRefreshFrequency()
-  // pages) AND the manual force-refresh; it MUST scrub, exactly like UC8179.
+  // Only an explicit Fast with a valid baseline can use the differential DU.
+  // Full and Half both use GC. For OTP keep the stock distinction: a Half
+  // scrubs every pixel (OLD = ~target); a Full drives from a white seed.
   const bool scrub = (mode == RefreshMode::Half);
   const bool fast = (mode == RefreshMode::Fast) && !_needFullClear && _oldPlaneValid;
 
@@ -438,6 +489,14 @@ bool Uc8279X4Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t*
 
   streamPlane(bus, CMD_DTM2, fb);
   if (!fast) {
+#if FREEINK_DEVICE_X4PRO
+    if (gcRegisterLuts(false) != nullptr) {
+      // Register GC rows ignore OLD. OLD = target keeps every pixel on the
+      // unambiguous WW (0x21) / KK (0x24) rows, which still drive a full GC.
+      streamPlane(bus, CMD_DTM1, fb);
+      if (!_otpSettingsLoaded || !_isScreenOn) primeOtpSettings(bus);
+    } else
+#endif
     if (scrub) {
       // Half scrub: OLD = ~target -> every pixel transitions, purging idle charge.
       streamPlane(bus, CMD_DTM1, fb, /*invert=*/true);
@@ -451,10 +510,15 @@ bool Uc8279X4Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t*
     // residual edge charge before restoring the ordinary differential baseline.
     streamPlane(bus, CMD_DTM1, fb, /*invert=*/true);
   }
-  // Consumed: the white-seed (!fast) or the re-drive above already scrubbed any
-  // post-AA gray residue for this frame.
+  // The clean or the re-drive above already scrubbed the post-AA residue.
   _redriveAfterGray = false;
 
+  // Only a hinted page-turn cleanup of a plain B/W page takes the quick bank.
+#if FREEINK_DEVICE_X4PRO
+  _pendingStrongGc = !fast && (!_quickGcNext || _strongGcPending || turnOff);
+  _quickGcNext = false;
+  if (!fast) _strongGcPending = false;
+#endif
   startBwRefresh(bus, fast);
   _pendingPartial = fast;
   _pendingTurnOff = turnOff;
@@ -468,6 +532,8 @@ void Uc8279X4Driver::startBwRefresh(EpdBus& bus, bool fast) {
   // writes the 1-byte CDI on EVERY refresh, 0x97 full / 0xD7 partial — then
   // CCSET/TSSET (+ PFS/gate-scan on partial), PON, the partial window, and a
   // PSR rewrite between PON and DRF (same latch behavior as the AA path).
+  // A register GC keeps that sequence and only latches REG=1 and uploads its
+  // bank before DRF, the AA path's PSR -> LUT -> DRF order.
   bus.cmd(CMD_VCOM_DATA_INTERVAL);
   bus.data(fast ? _cfg.cdiBwFast : _cfg.cdiBwFull);
   bus.cmd(CMD_CCSET);
@@ -508,8 +574,17 @@ void Uc8279X4Driver::startBwRefresh(EpdBus& bus, bool fast) {
     bus.data(0x01);
   }
   bus.cmd(CMD_PANEL_SETTING);
-  bus.data(static_cast<uint8_t>(_cfg.psr0 & 0xDF));  // REG cleared -> OTP (0x13)
+  uint8_t psr = _cfg.psr0 & 0xDF;  // REG=0: OTP
+#if FREEINK_DEVICE_X4PRO
+  const Uc8279X4GcLut* gcLuts = fast ? nullptr : gcRegisterLuts(_pendingStrongGc);
+  if (gcLuts) psr = _cfg.psr0;
+#endif
+  bus.data(psr);
   bus.data(_cfg.psr1);
+#if FREEINK_DEVICE_X4PRO
+  if (gcLuts) uploadGcLuts(bus, gcLuts);
+  else _otpSettingsLoaded = true;
+#endif
   bus.cmd(CMD_DISPLAY_REFRESH);
   // Confirm the waveform started (BUSY dropped) before returning, so
   // displayFinish() only rides out the completion edge.
@@ -552,11 +627,27 @@ void Uc8279X4Driver::displayWindow(EpdBus& bus, const uint8_t* fb, const uint8_t
   _winActive = false;
 }
 
+#if FREEINK_DEVICE_X4PRO
+// A register GC runs with whatever drive settings the controller holds. After
+// PON they are the MTP defaults; the RC3 one-pass text and image packets can
+// also override them. Run the stock DU once on OLD = NEW = target to load its
+// OTP record without developing any pixels.
+void Uc8279X4Driver::primeOtpSettings(EpdBus& bus) {
+  startBwRefresh(bus, true);
+  bus.waitRefreshComplete(" 8279x4_PRIME_DRF");
+  bus.cmd(CMD_PARTIAL_OUT);
+}
+#endif
+
 void Uc8279X4Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
   if (!_pendingRefresh) return;
   _pendingRefresh = false;
 
-  bus.waitRefreshComplete(" 8279x4_DRF");
+#if FREEINK_DEVICE_X4PRO
+  bus.waitRefreshComplete(bwDrfTag(_pendingPartial, _pendingStrongGc));
+#else
+  bus.waitRefreshComplete(kOtpDrfTag);
+#endif
   if (_pendingPartial) bus.cmd(CMD_PARTIAL_OUT);
 
   // Sync the OLD plane (0x10) with the just-displayed frame so the NEXT partial
@@ -582,6 +673,16 @@ void Uc8279X4Driver::requestResync(uint8_t settlePasses) {
 }
 
 void Uc8279X4Driver::skipInitialResync() { _needFullClear = false; }
+
+#if FREEINK_DEVICE_X4PRO
+bool Uc8279X4Driver::supportsPageTurnCleanup() const {
+  return FREEINK_UC8279X4_GC_WAVEFORM == 2 && gcRegisterLuts(false) != nullptr;
+}
+
+void Uc8279X4Driver::preferQuickClean() {
+  if (supportsPageTurnCleanup()) _quickGcNext = true;
+}
+#endif
 
 void Uc8279X4Driver::deepSleep(EpdBus& bus) {
   _textAa.invalidate();
@@ -618,6 +719,10 @@ GrayscaleCapabilities Uc8279X4Driver::grayscaleCapabilities(GrayscaleMode mode) 
 
 void Uc8279X4Driver::beginGrayscale(EpdBus& bus, const uint8_t* fb, GrayscaleMode mode, RefreshMode fallback,
                                     bool turnOff) {
+#if FREEINK_DEVICE_X4PRO
+  _quickGcNext = false;
+  _strongGcPending = true;
+#endif
   if (mode == GrayscaleMode::Overlay && _readerRefresh && _textAa.ready()) {
     if (fallback != RefreshMode::Fast || _needFullClear) display(bus, fb, nullptr, fallback, false);
     _absoluteInput = false;
@@ -710,11 +815,17 @@ void Uc8279X4Driver::writeGrayscalePlaneStrip(EpdBus& bus, GrayPlane plane, cons
 
 void Uc8279X4Driver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, const unsigned char* lut,
                                  bool factoryMode) {
+#if FREEINK_DEVICE_X4PRO
+  _strongGcPending = true;
+#endif
   if (_textAa.active()) {
     if (!_textAa.compose()) { _textAa.invalidate(); _needFullClear = true; return; }
     bus.waitBusy("8279 text ready");
     const uint8_t variant = BoardConfig::ACTIVE.displayControllerVariant;
     if (variant == 2 || variant == 3) {
+#if FREEINK_DEVICE_X4PRO
+      _otpSettingsLoaded = false;  // overrides OTP drive voltages
+#endif
       bus.cmd(0x01);
       const uint8_t volts[] = {0x43, 0, 0x78, 0x78, 0x17};
       bus.data(volts, sizeof(volts));
@@ -781,6 +892,9 @@ void Uc8279X4Driver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, c
   // Complete image planes need four tones; sparse overlay AA keeps the short stock bank.
   if (imagePacket) {
     // The voltage header is part of the waveform calibration, not an optional tail.
+#if FREEINK_DEVICE_X4PRO
+    _otpSettingsLoaded = false;
+#endif
     bus.cmd(CMD_PLL);
     bus.data(imagePacket[0]);
     bus.cmd(0x01);
@@ -871,6 +985,9 @@ void Uc8279X4Driver::displayGrayscaleBase(EpdBus& bus, const uint8_t* fb, Refres
   // previous / pending full clear), takes a real B/W activation via display().
   // Otherwise use stock's non-flashing prev->current transition.
   if (fallback != RefreshMode::Fast || !_grayRefreshedOnce || !_oldPlaneValid || _needFullClear) {
+#if FREEINK_DEVICE_X4PRO
+    _strongGcPending = true;
+#endif
     display(bus, fb, nullptr, fallback, turnOff);
     return;
   }

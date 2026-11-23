@@ -1030,7 +1030,14 @@ static void testTextAaAllocationFailure() {
   if constexpr (!std::is_same_v<Driver, Ssd1677Driver>) free(d._grayBase);
 }
 
+void testUc8279X4Gc();
+
 int main(int argc, char** argv) {
+  if (argc > 1 && std::strcmp(argv[1], "gc") == 0) {
+    testUc8279X4Gc();
+    std::puts("UC8279 X4 Pro GC waveforms, power, AA recovery, and panel gating passed");
+    return 0;
+  }
   if (argc > 1 && std::strcmp(argv[1], "metalio") == 0) {
     testMetalio();
     std::puts("Metalio refresh, temperature, grayscale fallback and async power-down passed");

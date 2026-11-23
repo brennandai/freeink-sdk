@@ -22,21 +22,34 @@ with tempfile.TemporaryDirectory(prefix="freeink-pro-test-") as directory:
     shutil.copy2(LIB / "src/FreeInkDisplay.cpp", root / "src/FreeInkDisplay.cpp")
     shutil.copy2(LIB / "include/FreeInkDisplay.h", root / "include/FreeInkDisplay.h")
     shutil.copy2(LIB / "include/GrayscaleCapabilities.h", root / "include/GrayscaleCapabilities.h")
-    for name in ("Ssd1677Luts.h", "Uc8279X3Luts.h", "UltraChipDirectGrayLuts.h", "X4ProTextAaLuts.h", "X4ProImageLuts.h"):
+    for name in ("Ssd1677Luts.h", "Uc8279X3Luts.h", "Uc8279X4GcLuts.h", "UltraChipDirectGrayLuts.h", "X4ProTextAaLuts.h", "X4ProImageLuts.h"):
         shutil.copy2(LIB / f"src/lut/{name}", root / f"src/lut/{name}")
     for name in ("Arduino.h", "BoardConfig.h", "SPI.h", "esp_heap_caps.h", "sdkconfig.h"):
         shutil.copy2(HERE / "pro_stubs" / name, root / name)
     shutil.copy2(HERE / "pro_stubs/EpdBus.h", root / "src/bus/EpdBus.h")
-    for single in (False, True):
-        exe = root / ("single" if single else "dual")
+    # Exercise both buffering modes on the default bank, plus OTP, the
+    # register control, and a build that does not support X4 Pro at all.
+    builds = ((False, True, None), (True, True, None), (False, True, 0),
+              (False, True, 1), (False, False, None))
+    for single, pro, waveform in builds:
+        exe = root / "pro-suite"
         command = [os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra",
                    "-Wno-unused-parameter", "-Wno-unused-function", "-DBOARD_HAS_PSRAM=1",
                    "-DARDUINO=1", "-DFREEINK_DEVICE_METALIO_EINK4=1", "-I"+str(root), "-I"+str(root / "include")]
         if single:
             command += ["-DEINK_DISPLAY_SINGLE_BUFFER_MODE=1"]
-        command += [str(HERE / "test_pro.cpp"), str(root / "src/FreeInkDisplay.cpp")]
+        if pro:
+            command += ["-DFREEINK_DEVICE_X4PRO=1"]
+        if waveform is not None:
+            command += [f"-DFREEINK_UC8279X4_GC_WAVEFORM={waveform}"]
+        expected = 0 if not pro else 2 if waveform is None else waveform
+        command += [f"-DEXPECTED_GC_WAVEFORM={expected}", str(HERE / "test_pro.cpp"),
+                    str(HERE / "test_uc8279x4_gc.cpp"), str(root / "src/FreeInkDisplay.cpp")]
         command += [str(root / f"src/driver/{name}Driver.cpp") for name in drivers]
         subprocess.run(command + ["-o", str(exe)], check=True)
+        subprocess.run([str(exe), "gc"], check=True)
+        if not pro or waveform is not None:
+            continue
         subprocess.run([str(exe)], check=True)
         subprocess.run([str(exe), "sticky"], check=True)
         subprocess.run([str(exe), "metalio"], check=True)
@@ -47,7 +60,7 @@ with tempfile.TemporaryDirectory(prefix="freeink-pro-test-") as directory:
     spi.write_text(spi.read_text() + "\nclass SPIClass;\n")
     # Compile the production selector with all three X4-family drivers enabled.
     exe = root / "controller-identity"
-    command = [os.environ.get("CXX", "c++"), "-std=c++17", "-DARDUINO=1",
+    command = [os.environ.get("CXX", "c++"), "-std=c++17", "-DARDUINO=1", "-DFREEINK_DEVICE_X4PRO=1",
                "-DFREEINK_DRIVER_SSD1677=1", "-DFREEINK_DRIVER_UC8179=1", "-DFREEINK_DRIVER_UC8279_X4=1",
                "-I" + str(root), "-I" + str(root / "include"),
                str(HERE / "test_controller_identity.cpp"), str(root / "src/FreeInkDisplay.cpp")]

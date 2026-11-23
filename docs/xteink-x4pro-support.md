@@ -35,6 +35,21 @@ The SSD1677 bring-up notes below describe that controller specifically. See
 contracts and the [Licorice firmware audit](xteink-x4pro-licorice-analysis.md)
 for version-scoped controller findings.
 
+### Page-turn cleanup on UC8279 LUT_VER 0x02
+
+`supportsPageTurnCleanup()` identifies this panel when the merged waveform is
+enabled. Call `preferQuickClean()` immediately before a routine B/W Full or Half
+page-turn cleanup to request 26 frames on each rail. Without that hint, after
+wake or grayscale, or when powering off with the paint, the driver uses 32
+opposing frames, four idle frames, and 32 final frames. Both finish with one
+continuous push to the target color. Ordinary and windowed Fast still use
+factory DU. Neither cleanup requires an extra framebuffer.
+
+For panel comparisons, build with `FREEINK_UC8279X4_GC_WAVEFORM=0` for OTP,
+`1` for the register copy of the OTP control bank, or `2` (default) for the
+merged banks. Only `2` advertises the page-turn capability. Other boards and
+LUT versions retain their existing waveforms.
+
 ## Display — SSD1677, 800×480
 
 **Confirmed on hardware — the panel WORKS.** It paints normally using the

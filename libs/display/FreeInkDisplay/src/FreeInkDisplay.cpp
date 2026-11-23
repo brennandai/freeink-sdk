@@ -1203,6 +1203,20 @@ void FreeInkDisplay::skipInitialResync() {
   if (_driver) _driver->skipInitialResync();
 }
 
+bool FreeInkDisplay::supportsPageTurnCleanup() const {
+#if FREEINK_DEVICE_X4PRO
+  return _driver && _driver->supportsPageTurnCleanup();
+#else
+  return false;
+#endif
+}
+
+void FreeInkDisplay::preferQuickClean() {
+#if FREEINK_DEVICE_X4PRO
+  if (_driver) _driver->preferQuickClean();
+#endif
+}
+
 void FreeInkDisplay::beginDisplayWork() {
   if (_driver) _driver->beginDisplayWork();
 }

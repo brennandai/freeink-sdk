@@ -234,6 +234,10 @@ class PanelDriver {
     (void)ctx;
   }
   virtual void skipInitialResync() {}
+#if FREEINK_DEVICE_X4PRO
+  virtual bool supportsPageTurnCleanup() const { return false; }
+  virtual void preferQuickClean() {}
+#endif
   // Content-polarity hint: true while the facade is rendering inverted (dark
   // background) frames. Differential drivers idle unchanged pixels, so on a
   // dark background the residue of every white->black transition parks in the
