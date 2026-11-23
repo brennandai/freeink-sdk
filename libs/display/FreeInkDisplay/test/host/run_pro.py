@@ -44,7 +44,8 @@ with tempfile.TemporaryDirectory(prefix="freeink-pro-test-") as directory:
             command += [f"-DFREEINK_UC8279X4_GC_WAVEFORM={waveform}"]
         expected = 0 if not pro else 2 if waveform is None else waveform
         command += [f"-DEXPECTED_GC_WAVEFORM={expected}", str(HERE / "test_pro.cpp"),
-                    str(HERE / "test_uc8279x4_gc.cpp"), str(root / "src/FreeInkDisplay.cpp")]
+                    str(HERE / "test_uc8279x4_gc.cpp"), str(HERE / "test_uc8279x4_image_overlay.cpp"),
+                    str(root / "src/FreeInkDisplay.cpp")]
         command += [str(root / f"src/driver/{name}Driver.cpp") for name in drivers]
         subprocess.run(command + ["-o", str(exe)], check=True)
         subprocess.run([str(exe), "gc"], check=True)

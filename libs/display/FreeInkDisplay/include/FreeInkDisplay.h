@@ -133,6 +133,13 @@ class FreeInkDisplay {
   // follows. X3 uses the OEM differential base waveform; other panels display
   // normally with `fallback` mode. See PanelDriver::displayGrayscaleBase.
   void displayGrayscaleBase(RefreshMode fallback = HALF_REFRESH, bool turnOffScreen = false);
+  // One-shot: call immediately before displayGrayscaleBase(FAST_REFRESH) to
+  // shade a B/W image with the short AA bank on verified X4 Pro UC8279 0x02.
+#if FREEINK_DEVICE_X4PRO
+  void preferImageOverlay();
+#else
+  void preferImageOverlay() {}
+#endif
   // Starts a mode-bound pass. Absolute uploads must cover both complete planes
   // (full buffers or consecutive strips per plane) before displayGrayBuffer().
   // False means the requested mode is unavailable; no base was painted.
@@ -457,6 +464,9 @@ class FreeInkDisplay {
   // One pending flag for every deferred refresh (X4 async fire, X3 split);
   // drained by syncPendingAsync() through the driver's displayFinish().
   GrayscaleMode _grayscaleMode = GrayscaleMode::Overlay;
+#if FREEINK_DEVICE_X4PRO
+  bool _nextImageOverlay = false;
+#endif
   uint16_t _grayRows[2] = {0, 0};
   bool _grayPassFailed = false;
   void cancelGrayscalePass();

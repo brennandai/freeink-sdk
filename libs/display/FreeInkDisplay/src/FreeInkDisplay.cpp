@@ -515,6 +515,9 @@ uint8_t* FreeInkDisplay::lendBuildStorage(uint32_t* sizeOut) {
     return nullptr;
   }
   syncPendingAsync();  // a refresh in flight was reading these bytes
+#if FREEINK_DEVICE_X4PRO
+  if (_nextImageOverlay || _grayscaleMode == GrayscaleMode::ImageOverlay) cancelGrayscalePass();
+#endif
   _buildLent = true;
   frameBuffer = nullptr;                          // rendering is unavailable while the bytes are lent
   _shadowValid = false;                           // controller baseline no longer matches
@@ -915,6 +918,9 @@ void FreeInkDisplay::displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t 
 }
 
 void FreeInkDisplay::displayGrayBuffer(bool turnOffScreen, const unsigned char* lut, bool factoryMode) {
+#if FREEINK_DEVICE_X4PRO
+  _nextImageOverlay = false;
+#endif
 #if defined(SSD1677_PROBE_DEBUG) && SSD1677_PROBE_DEBUG
   Serial.printf("[EPD] displayGrayBuffer\n");
 #endif
@@ -932,12 +938,27 @@ void FreeInkDisplay::displayGrayBuffer(bool turnOffScreen, const unsigned char* 
   syncPendingAsync();
   _shadowValid = false;
   _redRamSynced = false;  // grayscale leaves RED holding a gray plane, not the BW baseline
-  if (_grayPassFailed) return;
+  if (_grayPassFailed) {
+#if FREEINK_DEVICE_X4PRO
+    if (_grayscaleMode == GrayscaleMode::ImageOverlay) cancelGrayscalePass();
+#endif
+    return;
+  }
   if (_grayscaleMode != GrayscaleMode::Overlay) {
     if (_grayRows[0] != getDisplayHeight() || _grayRows[1] != getDisplayHeight() || lut != nullptr) {
       cancelGrayscalePass();
       return;
     }
+#if FREEINK_DEVICE_X4PRO
+    if (_grayscaleMode == GrayscaleMode::ImageOverlay) {
+      _driver->displayGray(_bus, frameBuffer, turnOffScreen, nullptr, false);
+      // The driver restored the B/W baseline. A successful overlay doesn't
+      // owe the unconditional resync used for complete-plane images.
+      _grayscaleMode = GrayscaleMode::Overlay;
+      _grayPassFailed = true;  // suppress a repeated activation
+      return;
+    }
+#endif
     _driver->displayGray(_bus, frameBuffer, turnOffScreen, nullptr, true);
     _inversionDirty = false;
     cancelGrayscalePass();
@@ -982,6 +1003,9 @@ void FreeInkDisplay::copyGrayscaleBuffers(const uint8_t* lsbBuffer, const uint8_
 }
 
 void FreeInkDisplay::cancelGrayscalePass() {
+#if FREEINK_DEVICE_X4PRO
+  _nextImageOverlay = false;
+#endif
   if (_grayscaleMode == GrayscaleMode::Overlay) return;
   if (_driver) _driver->requestResync(1);
   _grayscaleMode = GrayscaleMode::Overlay;
@@ -992,6 +1016,10 @@ void FreeInkDisplay::cancelGrayscalePass() {
 bool FreeInkDisplay::acceptGrayscaleRows(unsigned plane, const uint8_t* data, uint16_t y, uint16_t rows) {
   if (_grayscaleMode == GrayscaleMode::Overlay) return true;
   const auto h = getDisplayHeight();
+#if FREEINK_DEVICE_X4PRO
+  // Overlay MSB is folded against the complete LSB plane.
+  if (_grayscaleMode == GrayscaleMode::ImageOverlay && plane == 1 && _grayRows[0] != h) _grayPassFailed = true;
+#endif
   if (_grayPassFailed || !data || !rows || (plane == 1 && _grayRows[0] == 0) || y != _grayRows[plane] || y >= h ||
       rows > h - y) {
     _grayPassFailed = true;
@@ -1005,6 +1033,9 @@ bool FreeInkDisplay::displayGrayscaleBase(GrayscaleMode mode, RefreshMode fallba
   cancelGrayscalePass();
   const auto caps = grayscaleCapabilities(mode);
   if (!caps.supported()) return false;
+#if FREEINK_DEVICE_X4PRO
+  if (mode == GrayscaleMode::ImageOverlay && !frameBuffer) return false;
+#endif
   // A pending inversion change needs a non-fast base, as in displayBuffer().
   // Painting it with displayBuffer() first would swap the buffers and hand
   // beginGrayscale() the previous page.
@@ -1024,7 +1055,17 @@ bool FreeInkDisplay::displayGrayscaleBase(GrayscaleMode mode, RefreshMode fallba
   return true;
 }
 
+#if FREEINK_DEVICE_X4PRO
+void FreeInkDisplay::preferImageOverlay() {
+  _nextImageOverlay = frameBuffer && grayscaleCapabilities(GrayscaleMode::ImageOverlay).supported();
+}
+#endif
+
 void FreeInkDisplay::displayGrayscaleBase(RefreshMode fallback, bool turnOffScreen) {
+#if FREEINK_DEVICE_X4PRO
+  if (_nextImageOverlay && fallback == FAST_REFRESH &&
+      displayGrayscaleBase(GrayscaleMode::ImageOverlay, fallback, turnOffScreen)) return;
+#endif
   cancelGrayscalePass();
   _grayPassFailed = false;
   if (_inverted || _inversionDirty) {
@@ -1048,6 +1089,9 @@ bool FreeInkDisplay::supportsDeferredGrayscaleBase() const {
 }
 
 bool FreeInkDisplay::displayGrayscaleBaseAsync(RefreshMode fallback) {
+#if FREEINK_DEVICE_X4PRO
+  _nextImageOverlay = false;  // the hint is only for the blocking FAST base
+#endif
 #ifdef EINK_DISPLAY_SINGLE_BUFFER_MODE
   if (supportsDeferredGrayscaleBase()) {
     DisplayPmLock pmLock;
@@ -1184,10 +1228,20 @@ void FreeInkDisplay::cleanupGrayscaleWithPreviousBuffer() {
 #endif
 
 void FreeInkDisplay::requestResync(uint8_t settlePasses) {
+#if FREEINK_DEVICE_X4PRO
+  _nextImageOverlay = false;
+  if (_grayscaleMode == GrayscaleMode::ImageOverlay) {
+    _grayPassFailed = true;
+    _grayscaleMode = GrayscaleMode::Overlay;
+  }
+#endif
   if (_driver) _driver->requestResync(settlePasses);
 }
 
 void FreeInkDisplay::setReaderRefresh(const bool reading) {
+#if FREEINK_DEVICE_X4PRO
+  if (_nextImageOverlay || _grayscaleMode == GrayscaleMode::ImageOverlay) cancelGrayscalePass();
+#endif
   if (_driver) _driver->setReaderRefresh(reading);
 }
 

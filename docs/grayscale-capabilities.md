@@ -23,6 +23,17 @@ CrossPoint. The `encoding` is `OverlayMasks`: in (LSB, MSB) order, dark gray is
 supplied by the base frame. This is the host input encoding; a driver may convert
 it internally before sending controller RAM.
 
+`ImageOverlay` shades a separately displayed B/W image with the short QY XTF AA
+bank at any coverage. It is available on the non-inverted X4 Pro UC8279 with
+probed LUT version `0x02`. The base must have white bits only for white pixels;
+black and both gray levels start black. Upload the entire LSB mask before the
+MSB mask, then call `displayGrayBuffer()`. If decoding fails, call
+`cleanupGrayscaleBuffers(bw)` with the intact B/W frame. The legacy reader can
+select this mode for one pass by calling `preferImageOverlay()` immediately
+before `displayGrayscaleBase(FAST_REFRESH)`. The hint has no effect on other
+panels or mode-bound base calls. The two gray selectors use identical stock
+LUT rows; use Direct or Absolute when distinct image tones take priority.
+
 `Absolute` supplies a complete four-tone image: black (0,0), dark (1,0),
 light (0,1), white (1,1). Every pixel, including text and background, must be
 present in both planes. The UC8279 X3 and the X4 SSD1677 configuration (including

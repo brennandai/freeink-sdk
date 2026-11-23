@@ -1031,11 +1031,13 @@ static void testTextAaAllocationFailure() {
 }
 
 void testUc8279X4Gc();
+void testUc8279X4ImageOverlay();
 
 int main(int argc, char** argv) {
   if (argc > 1 && std::strcmp(argv[1], "gc") == 0) {
     testUc8279X4Gc();
-    std::puts("UC8279 X4 Pro GC waveforms, power, AA recovery, and panel gating passed");
+    testUc8279X4ImageOverlay();
+    std::puts("UC8279 X4 Pro GC waveforms, image overlays, power, AA recovery, and panel gating passed");
     return 0;
   }
   if (argc > 1 && std::strcmp(argv[1], "metalio") == 0) {

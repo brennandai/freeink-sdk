@@ -170,7 +170,8 @@ class Uc8279X4Driver : public PanelDriver {
   // absolute plane0, copyGrayscaleMsb derives plane1 and recovers the base for
   // the post-DRF restore. SPIRAM-backed, framebuffer-sized, allocated in begin().
   uint8_t* _grayBase = nullptr;
-  bool _grayImagePass = false;
+  enum class OverlayBank : uint8_t { Auto, DenseImage, ShortAA };
+  OverlayBank _overlayBank = OverlayBank::Auto;
   bool _grayBaseValid = false;
   bool _absoluteGrayPlanes = false;
   bool _absoluteInput = false;

@@ -7,8 +7,9 @@ namespace freeink {
 // Overlay uses the existing base + LSB/MSB mask API. Absolute requires planes
 // containing every pixel, including the B/W background. Direct uses that same
 // encoding with one combined activation using the full-quality image waveform.
-// Querying selects no mode.
-enum class GrayscaleMode : uint8_t { Overlay, Absolute, Direct };
+// ImageOverlay uses complete overlay masks over a separately painted B/W image
+// and keeps the short AA waveform regardless of coverage. Querying selects no mode.
+enum class GrayscaleMode : uint8_t { Overlay, Absolute, Direct, ImageOverlay };
 enum class GrayscaleEncoding : uint8_t { Unsupported, OverlayMasks, AbsolutePlanes };
 enum class GrayscaleBase : uint8_t { Separate, Combined };
 

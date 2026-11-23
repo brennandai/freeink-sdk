@@ -349,7 +349,7 @@ void Uc8279X4Driver::begin(EpdBus& bus) {
   _quickGcNext = false;
 #endif
   _directGrayOnPanel = false;
-  _grayImagePass = false;
+  _overlayBank = OverlayBank::Auto;
   _absoluteInput = false;
   _directGrayPass = false;
   _oldPlaneValid = false;
@@ -460,7 +460,7 @@ bool Uc8279X4Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t*
   _textAa.invalidate();
   const bool leavingDirectGray = _directGrayOnPanel;
   _directGrayOnPanel = false;
-  _grayImagePass = false;
+  _overlayBank = OverlayBank::Auto;
   _absoluteInput = false;
   _directGrayPass = false;
   (void)prev;
@@ -676,7 +676,7 @@ void Uc8279X4Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
 
 void Uc8279X4Driver::requestResync(uint8_t settlePasses) {
   _textAa.invalidate();
-  _grayImagePass = false;
+  _overlayBank = OverlayBank::Auto;
   _absoluteInput = false;
   _directGrayPass = false;
   (void)settlePasses;
@@ -698,7 +698,7 @@ void Uc8279X4Driver::preferQuickClean() {
 void Uc8279X4Driver::deepSleep(EpdBus& bus) {
   _textAa.invalidate();
   _directGrayOnPanel = false;
-  _grayImagePass = false;
+  _overlayBank = OverlayBank::Auto;
   _absoluteInput = false;
   _directGrayPass = false;
   if (_isScreenOn) {
@@ -717,6 +717,12 @@ void Uc8279X4Driver::deepSleep(EpdBus& bus) {
 // conflated them → white-text ghosting). plane0/LSB -> DTM1 (0x10),
 // plane1/MSB -> DTM2 (0x13).
 GrayscaleCapabilities Uc8279X4Driver::grayscaleCapabilities(GrayscaleMode mode) const {
+#if FREEINK_DEVICE_X4PRO
+  if (mode == GrayscaleMode::ImageOverlay && BoardConfig::ACTIVE.board == BoardConfig::Board::XteinkX4Pro &&
+      BoardConfig::ACTIVE.displayController == BoardConfig::DisplayController::UC8279 &&
+      BoardConfig::ACTIVE.displayControllerVariant == 0x02)
+    return {GrayscaleEncoding::OverlayMasks, GrayscaleBase::Separate, _textAa.ready(), false, false};
+#endif
   if (mode == GrayscaleMode::Overlay && _readerRefresh && _textAa.ready())
     return {GrayscaleEncoding::OverlayMasks, GrayscaleBase::Combined, true, false, false};
   // Firmware 26110201 adds an explicit ZHX quality packet for Pro 0x67.
@@ -741,7 +747,7 @@ void Uc8279X4Driver::beginGrayscale(EpdBus& bus, const uint8_t* fb, GrayscaleMod
     return;
   }
   _textAa.invalidate();
-  _grayImagePass = false;
+  _overlayBank = OverlayBank::Auto;
   _absoluteInput = false;
   _directGrayPass = false;
   if (mode == GrayscaleMode::Direct) {
@@ -754,6 +760,24 @@ void Uc8279X4Driver::beginGrayscale(EpdBus& bus, const uint8_t* fb, GrayscaleMod
     _redriveAfterGray = false;
     return;
   }
+#if FREEINK_DEVICE_X4PRO
+  if (mode == GrayscaleMode::ImageOverlay && fb) {
+    // A previous RC3 packet or PON can leave non-OTP drive settings. Paint
+    // the base with factory B/W in that case instead of running PRE_BW_MID
+    // under the wrong settings. A pending clean still goes through displayStart.
+    if (_directGrayOnPanel && _needFullClear && fallback == RefreshMode::Fast && supportsPageTurnCleanup()) {
+      fallback = RefreshMode::Half;  // silent OTP exit before the already-required strong GC
+    }
+    if (!_otpSettingsLoaded || !_isScreenOn) {
+      displayStart(bus, fb, nullptr, fallback, turnOff);
+      displayFinish(bus, fb);
+    } else {
+      displayGrayscaleBase(bus, fb, fallback, turnOff);
+    }
+    _overlayBank = OverlayBank::ShortAA;
+    return;
+  }
+#endif
   displayGrayscaleBase(bus, fb, fallback, turnOff);
   _absoluteInput = mode == GrayscaleMode::Absolute;
 }
@@ -798,10 +822,14 @@ void Uc8279X4Driver::copyGrayscaleMsb(EpdBus& bus, const uint8_t* msb) {
   // The MSB mask marks every grey pixel (dark=(1,1), light=(0,1)); its
   // coverage separates image passes from glyph anti-aliasing without a
   // caller-side hint (see displayGray).
+#if FREEINK_DEVICE_X4PRO
+  if (_overlayBank != OverlayBank::ShortAA)
+#endif
   {
     uint32_t grayPx = 0;
     for (uint32_t i = 0; i < _bufferSize; i++) grayPx += __builtin_popcount(msb[i]);
-    _grayImagePass = grayPx * 100u > _bufferSize * 8u * FREEINK_UC8279X4_QUALITY_COVERAGE_PCT;
+    _overlayBank = grayPx * 100u > _bufferSize * 8u * FREEINK_UC8279X4_QUALITY_COVERAGE_PCT
+                       ? OverlayBank::DenseImage : OverlayBank::Auto;
   }
   if (_absoluteGrayPlanes && _grayBase != nullptr) {
     // plane1 = plane0 ^ maskMsb (streamed inverted). Then recover the B/W base
@@ -890,7 +918,14 @@ void Uc8279X4Driver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, c
 
   (void)lut;
 
-  const bool image = _directGrayPass || _absoluteInput || factoryMode || _grayImagePass;
+#if FREEINK_DEVICE_X4PRO
+  if (_overlayBank == OverlayBank::ShortAA && (!_absoluteGrayPlanes || !_grayBaseValid)) {
+    // Without a folded pair (e.g. no snapshot storage), leave the B/W image visible.
+    requestResync(1);
+    return;
+  }
+#endif
+  const bool image = _directGrayPass || _absoluteInput || factoryMode || _overlayBank == OverlayBank::DenseImage;
   const auto* imagePacket = image ? selectImagePacket() : nullptr;
   const uint8_t psr = _cfg.psr0;
 
@@ -931,7 +966,6 @@ void Uc8279X4Driver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, c
       bus.data(lut.data, GRAY_LUT_LEN);
     }
   }
-  _grayImagePass = false;
   bus.cmd(CMD_VCOM_DATA_INTERVAL);
   bus.data(_cfg.cdiAa);  // constant 0x97 every AA refresh (stock; no first/later split)
   _grayRefreshedOnce = true;
@@ -984,7 +1018,7 @@ void Uc8279X4Driver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, c
   _directGrayOnPanel = _directGrayPass;
   _redriveAfterGray = !_directGrayPass;
   if (_directGrayPass) _needFullClear = true;
-  _grayImagePass = false;
+  _overlayBank = OverlayBank::Auto;
   _absoluteInput = false;
   _directGrayPass = false;
 }
@@ -1094,7 +1128,7 @@ void Uc8279X4Driver::cleanupGrayscaleBuffers(EpdBus& bus, const uint8_t* bw) {
     return;
   }
 
-  _grayImagePass = false;
+  _overlayBank = OverlayBank::Auto;
   _absoluteInput = false;
   _directGrayPass = false;
   _grayBaseValid = false;

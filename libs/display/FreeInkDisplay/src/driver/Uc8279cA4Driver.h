@@ -31,7 +31,9 @@ class Uc8279cA4Driver : public PanelDriver {
   // which drives every pixel from any prior state.
   GrayscaleCapabilities grayscaleCapabilities(GrayscaleMode mode = GrayscaleMode::Overlay) const override {
     if (mode == GrayscaleMode::Overlay) return {GrayscaleEncoding::OverlayMasks, GrayscaleBase::Combined, true, false, false};
-    return {GrayscaleEncoding::AbsolutePlanes, GrayscaleBase::Combined, true, false, false};
+    if (mode == GrayscaleMode::Absolute || mode == GrayscaleMode::Direct)
+      return {GrayscaleEncoding::AbsolutePlanes, GrayscaleBase::Combined, true, false, false};
+    return {};
   }
   void beginGrayscale(EpdBus& bus, const uint8_t* fb, GrayscaleMode mode, RefreshMode fallback, bool turnOff) override;
   void writeGrayscalePlaneStrip(EpdBus& bus, GrayPlane plane, const uint8_t* rows, uint16_t yStart,
